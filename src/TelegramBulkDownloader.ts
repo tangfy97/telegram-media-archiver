@@ -1,4 +1,4 @@
-import { TelegramClient } from 'telegram';
+import { Api, TelegramClient } from 'telegram';
 import { StringSession } from 'telegram/sessions';
 import fs from 'fs';
 import path from 'path';
@@ -7,13 +7,33 @@ import Byteroo, { Container } from 'byteroo';
 import { Entity } from 'telegram/define';
 import extractDisplayName from './helpers/extractDisplayName';
 import ask from './helpers/ask';
+import buildDownloadFilename from './helpers/buildDownloadFilename';
 import JsonSerializer from './helpers/JsonSerializer';
 import checkbox from '@inquirer/checkbox';
 import getInputFilter from './helpers/getInputFilter';
-import getFilenameExtension from './helpers/getFilenameExtension';
+import messageMatchesMediaType from './helpers/messageMatchesMediaType';
+import parseDownloadStartDate from './helpers/parseDownloadStartDate';
 import MediaType from './types/MediaType';
 import { LogLevel } from 'telegram/extensions/Logger';
 import cliProgress from 'cli-progress';
+
+type DownloadMediaTypeState = {
+  type: MediaType;
+  offset: number;
+};
+
+type DownloadState = {
+  displayName?: string;
+  entityJson: any;
+  outPath: string;
+  metadata: boolean;
+  mediaTypes: DownloadMediaTypeState[];
+  originalId: string;
+  includeReplies?: boolean;
+  limit?: number;
+  replyOffset?: number;
+  startDate?: string;
+};
 
 class TelegramBulkDownloader {
   private storage: Byteroo;
@@ -35,6 +55,211 @@ class TelegramBulkDownloader {
     this.SIGINT = false;
   }
 
+  private getDownloadState(id: string) {
+    return this.state.get(id) as DownloadState;
+  }
+
+  private getDownloadStartDate(id: string) {
+    const startDate = this.getDownloadState(id).startDate;
+    return startDate
+      ? Math.floor(new Date(startDate).getTime() / 1000)
+      : undefined;
+  }
+
+  private ensureDownloadDir(downloadDir: string) {
+    if (!fs.existsSync(downloadDir)) {
+      fs.mkdirSync(downloadDir, { recursive: true });
+    }
+  }
+
+  private async downloadMessage(
+    msg: Api.Message,
+    downloadDir: string,
+    fileName?: string
+  ) {
+    if (!this.client) throw new Error('TelegramClient undefined');
+    const targetFileName = fileName || buildDownloadFilename(msg);
+    const bar = new cliProgress.SingleBar(
+      {
+        format: `${targetFileName} {bar} {percentage}% | ETA: {eta}s`,
+      },
+      cliProgress.Presets.legacy
+    );
+
+    bar.start(100, 0);
+
+    try {
+      const buffer = await this.client.downloadMedia(msg, {
+        progressCallback: (downloaded, total) => {
+          if (this.SIGINT) {
+            throw new Error(`Aborting download, SIGINT=true`);
+          }
+
+          const ratio = Number(downloaded) / Number(total);
+          const progress = Math.round(Number(ratio) * 100);
+          bar.update(progress);
+        },
+      });
+
+      bar.update(100);
+      fs.writeFileSync(path.join(downloadDir, targetFileName), buffer as any);
+    } finally {
+      bar.stop();
+    }
+  }
+
+  private async exitOnInterrupt() {
+    if (!this.client) throw new Error('TelegramClient undefined');
+    console.log(`Exiting, SIGINT=${this.SIGINT}`);
+    await this.client.disconnect();
+    await this.client.destroy();
+    await this.state.commit();
+    process.exit(0);
+  }
+
+  private async downloadRepliesForMessage(
+    entity: Entity,
+    rootMessage: Api.Message,
+    jsonSerializer?: JsonSerializer
+  ) {
+    if (!this.client) throw new Error('TelegramClient undefined');
+
+    const id = entity.id.toString();
+    const selectedMediaTypes = this.getDownloadState(id).mediaTypes.map(
+      (entry) => entry.type
+    );
+    const downloadDir = this.getDownloadState(id).outPath;
+    const startDate = this.getDownloadStartDate(id);
+    let offset = 0;
+
+    while (true) {
+      const messages = await this.client.getMessages(entity, {
+        limit: 100,
+        offsetId: offset,
+        offsetDate: startDate,
+        reverse: true,
+        replyTo: rootMessage.id,
+      });
+
+      if (messages.length === 0) {
+        break;
+      }
+
+      let lastReplyId = 0;
+      for (const replyMessage of messages) {
+        lastReplyId = replyMessage.id;
+
+        if (jsonSerializer) {
+          await jsonSerializer.append(replyMessage);
+        }
+
+        if (
+          selectedMediaTypes.some((mediaType) =>
+            messageMatchesMediaType(replyMessage, mediaType)
+          )
+        ) {
+          await this.downloadMessage(
+            replyMessage,
+            downloadDir,
+            buildDownloadFilename(replyMessage, {
+              threadRootId: rootMessage.id,
+            })
+          );
+        }
+
+        if (this.SIGINT) {
+          break;
+        }
+      }
+
+      offset = lastReplyId;
+
+      if (this.SIGINT || lastReplyId <= 0 || messages.length < 100) {
+        break;
+      }
+    }
+  }
+
+  private async downloadReplyThreads(entity: Entity) {
+    if (!this.client) throw new Error('TelegramClient undefined');
+
+    const id = entity.id.toString();
+    const downloadState = this.getDownloadState(id);
+    const downloadDir = downloadState.outPath;
+    const startDate = this.getDownloadStartDate(id);
+
+    this.ensureDownloadDir(downloadDir);
+
+    let jsonSerializer;
+    if (downloadState.metadata) {
+      jsonSerializer = new JsonSerializer(path.join(downloadDir, 'metadata.json'));
+    }
+
+    console.log(
+      'Scanning messages with comments/reply threads. This can take longer on large chats.'
+    );
+
+    while (true) {
+      const offset = this.getDownloadState(id).replyOffset || 0;
+      const messages = await this.client.getMessages(entity, {
+        limit: 100,
+        offsetId: offset,
+        offsetDate: startDate,
+        reverse: true,
+      });
+
+      if (messages.length === 0) {
+        break;
+      }
+
+      let lastMessageId = offset;
+      for (const msg of messages) {
+        lastMessageId = msg.id;
+
+        if (msg.replies) {
+          try {
+            await this.downloadRepliesForMessage(entity, msg, jsonSerializer);
+          } catch (err: any) {
+            if (
+              err?.errorMessage === 'PEER_ID_INVALID' ||
+              String(err?.message || err).includes('PEER_ID_INVALID')
+            ) {
+              console.warn(
+                'Comments/reply thread downloads are not available for this chat type.'
+              );
+              return;
+            }
+
+            console.warn(
+              `Failed to download replies for message ${msg.id}:`,
+              err
+            );
+          }
+        }
+
+        this.state.set(id, {
+          ...this.getDownloadState(id),
+          replyOffset: msg.id,
+        });
+
+        if (this.SIGINT) {
+          break;
+        }
+      }
+
+      if (this.SIGINT) {
+        await this.exitOnInterrupt();
+      }
+
+      if (
+        lastMessageId >= (this.getDownloadState(id).limit || 0) ||
+        messages.length < 100
+      ) {
+        break;
+      }
+    }
+  }
+
   private async newDownload() {
     if (!this.client) throw new Error('TelegramClient undefined');
     const query = await inquirer.prompt([
@@ -46,13 +271,39 @@ class TelegramBulkDownloader {
 
     try {
       const res = await this.client.getEntity(query.id);
-      const { metadata } = await inquirer.prompt([
+      const { metadata, includeReplies, useStartDate, startDateInput } =
+        await inquirer.prompt([
         {
           name: 'metadata',
           message: 'Do you want to include metadata.json? (Recommended: no)',
           type: 'confirm',
         },
-      ]);
+          {
+            name: 'includeReplies',
+            message:
+              'Do you want to include comments/reply threads? (Slower on large chats)',
+            type: 'confirm',
+          },
+          {
+            name: 'useStartDate',
+            message: 'Do you want to start downloading from a specific date?',
+            type: 'confirm',
+          },
+          {
+            name: 'startDateInput',
+            message:
+              'Enter the start date (YYYY-MM-DD or YYYY-MM-DD HH:mm[:ss]): ',
+            when: (answers) => answers.useStartDate,
+            validate: (input) => {
+              try {
+                parseDownloadStartDate(input);
+                return true;
+              } catch (err) {
+                return err instanceof Error ? err.message : 'Invalid date';
+              }
+            },
+          },
+        ]);
       let mediaTypes: MediaType[] = [];
       while (mediaTypes.length <= 0) {
         mediaTypes = await checkbox({
@@ -68,12 +319,19 @@ class TelegramBulkDownloader {
         });
       }
       const outPath = await ask('Enter the folder path for file storage: ');
+      const startDate = useStartDate
+        ? parseDownloadStartDate(startDateInput).toISOString()
+        : undefined;
+
       this.state.set(res.id.toString(), {
         displayName: extractDisplayName(res),
         entityJson: res.toJSON(),
         outPath: path.resolve(outPath),
         metadata,
+        includeReplies,
         mediaTypes: mediaTypes.map((e) => ({ type: e, offset: 0 })),
+        replyOffset: 0,
+        startDate,
         originalId: query.id
       });
       await this.download(res);
@@ -87,8 +345,12 @@ class TelegramBulkDownloader {
     if (!this.client) throw new Error('TelegramClient undefined');
     const id = entity.id.toString();
 
-    for (const mediaType of this.state.get(id).mediaTypes) {
+    for (const mediaType of this.getDownloadState(id).mediaTypes) {
       await this.downloadMediaType(entity, mediaType.type);
+    }
+
+    if (this.getDownloadState(id).includeReplies) {
+      await this.downloadReplyThreads(entity);
     }
 
     this.state.remove(id);
@@ -101,63 +363,53 @@ class TelegramBulkDownloader {
     this.isDownloading = true;
     const id = entity.id.toString();
     const latestMessage = await this.client.getMessages(entity, { limit: 1 });
-    this.state.set(id, { ...this.state.get(id), limit: latestMessage[0].id });
+    const startDate = this.getDownloadStartDate(id);
 
-    const metadataOption = this.state.get(id).metadata;
+    this.state.set(id, {
+      ...this.getDownloadState(id),
+      limit: latestMessage[0]?.id || 0,
+    });
+
+    const metadataOption = this.getDownloadState(id).metadata;
     let jsonSerializer;
     if (metadataOption) {
       jsonSerializer = new JsonSerializer(
-        path.join(this.state.get(id).outPath, 'metadata.json')
+        path.join(this.getDownloadState(id).outPath, 'metadata.json')
       );
     }
 
+    this.ensureDownloadDir(this.getDownloadState(id).outPath);
+
     while (true) {
-      let offset = this.state
-        .get(id)
-        .mediaTypes.find((e: any) => e.type === mediaType).offset;
+      const mediaTypeState = this.getDownloadState(id).mediaTypes.find(
+        (entry) => entry.type === mediaType
+      );
+
+      if (!mediaTypeState) {
+        break;
+      }
+
+      let offset = mediaTypeState.offset;
 
       const messages = await this.client.getMessages(entity, {
         limit: 1000,
         offsetId: offset,
+        offsetDate: startDate,
         reverse: true,
         filter: getInputFilter(mediaType),
       });
 
       const mediaMessages = messages;
 
-      const downloadDir = this.state.get(id).outPath;
-      if (!fs.existsSync(downloadDir)) {
-        fs.mkdirSync(downloadDir, { recursive: true });
+      if (mediaMessages.length === 0) {
+        break;
       }
 
+      const downloadDir = this.getDownloadState(id).outPath;
       let msgId = offset;
       for (const msg of mediaMessages) {
-        const bar = new cliProgress.SingleBar(
-          {
-            format: `${msg.id}.${getFilenameExtension(
-              msg
-            )} {bar} {percentage}% | ETA: {eta}s`,
-          },
-          cliProgress.Presets.legacy
-        );
-        bar.start(100, 0);
         try {
-          const buffer = await this.client.downloadMedia(msg, {
-            progressCallback: (downloaded, total) => {
-              if (this.SIGINT)
-                throw new Error(`Aborting download, SIGINT=true`);
-              const ratio = Number(downloaded) / Number(total);
-              const progress = Math.round(Number(ratio) * 100);
-              bar.update(progress);
-            },
-          });
-          bar.update(100);
-          bar.stop();
-          const filePath = path.join(
-            downloadDir,
-            `${msg.id}.${getFilenameExtension(msg)}`
-          );
-          fs.writeFileSync(filePath, buffer as any);
+          await this.downloadMessage(msg, downloadDir);
           msgId = msg.id;
         } catch (err) {
           console.warn(err);
@@ -166,11 +418,11 @@ class TelegramBulkDownloader {
         if (this.SIGINT) break;
       }
 
-      offset = mediaMessages.length <= 0 ? offset + 999 : msgId;
+      offset = msgId;
 
       this.state.set(id, {
-        ...this.state.get(id),
-        mediaTypes: this.state.get(id).mediaTypes.map((e: any) => {
+        ...this.getDownloadState(id),
+        mediaTypes: this.getDownloadState(id).mediaTypes.map((e: any) => {
           if (e.type === mediaType)
             return {
               ...e,
@@ -181,16 +433,11 @@ class TelegramBulkDownloader {
       });
 
       if (this.SIGINT) {
-        console.log(`Exiting, SIGINT=${this.SIGINT}`);
-        await this.client.disconnect();
-        await this.client.destroy();
-        await this.state.commit();
-        process.exit(0);
+        await this.exitOnInterrupt();
       }
-      if (offset >= this.state.get(id).limit) {
-        console.log(`Exiting, SIGINT=${this.SIGINT}`);
+      if (offset >= this.getDownloadState(id).limit!) {
         this.state.set(id, {
-          ...this.state.get(id),
+          ...this.getDownloadState(id),
           mediaTypes: this.state
             .get(id)
             .mediaTypes.filter((e: any) => e.type !== mediaType),
