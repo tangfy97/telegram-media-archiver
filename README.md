@@ -77,6 +77,49 @@ After login, choose `Start new download` and follow the prompts.
 4. Choose whether to start from a specific date.
 5. Select the media types to download.
 6. Choose an output folder.
+7. Review the download summary.
+8. Confirm to start the download.
+
+The downloader prints a summary before it writes files, so you can cancel if
+the target, output folder, date range, or media types look wrong.
+
+## Date Filtering
+
+When you choose to start from a specific date, the downloader first resolves
+that date to a Telegram message boundary and then paginates by message ID. This
+is more reliable than using the date on every media search request.
+
+Accepted date formats:
+
+```text
+2026-04-08
+2026/04/08
+2026-4-8
+2026-04-08 12:30
+2026-04-08 12:30:00
+```
+
+Dates are interpreted in your local timezone.
+
+## Command-Line Output
+
+The CLI is still fully terminal-based, but it now shows:
+
+- a startup banner;
+- a download summary before work begins;
+- one section per media type;
+- batch-level progress messages;
+- per-file progress bars;
+- warnings when a file or reply thread cannot be downloaded;
+- a final summary with downloaded count, failed count, scanned messages, reply threads, and elapsed time.
+
+## Resuming Downloads
+
+If you interrupt a download with `Ctrl+C`, progress is saved. Choose
+`Resume active download` the next time you start the tool.
+
+The resume menu shows the chat, date range, remaining work, and output folder
+for each active download.
 
 ## File Naming
 
@@ -131,6 +174,18 @@ Run the built CLI:
 
 ```bash
 npm start
+```
+
+Link the local checkout as a global command:
+
+```bash
+npm link
+```
+
+After linking, rebuild after code changes:
+
+```bash
+npm run build
 ```
 
 ## Upstream Attribution

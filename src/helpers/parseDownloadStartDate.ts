@@ -1,5 +1,5 @@
 const DATE_INPUT_PATTERN =
-  /^(\d{4})-(\d{2})-(\d{2})(?:[ T](\d{2}):(\d{2})(?::(\d{2}))?)?$/;
+  /^(\d{4})[-/](\d{1,2})[-/](\d{1,2})(?:[ T](\d{1,2}):(\d{2})(?::(\d{2}))?)?$/;
 
 const parseDownloadStartDate = (input: string) => {
   const trimmedInput = input.trim();
@@ -7,7 +7,7 @@ const parseDownloadStartDate = (input: string) => {
 
   if (!match) {
     throw new Error(
-      'Invalid date format. Use YYYY-MM-DD or YYYY-MM-DD HH:mm[:ss]'
+      'Invalid date format. Use YYYY-MM-DD, YYYY/MM/DD, or add HH:mm[:ss]'
     );
   }
 
