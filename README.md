@@ -71,16 +71,15 @@ After login, choose `Start new download` and follow the prompts.
 
 ## Example Workflow
 
-1. Enter a target username or chat ID.
-2. Choose whether to write `metadata.json`.
-3. Choose whether to include comments and reply threads.
-4. Choose whether to start from a specific date.
-5. Select the media types to download.
-6. Choose an output folder.
-7. Review the download summary.
-8. Confirm to start the download.
+1. Choose `New download - choose chat, date, media, and output`.
+2. Choose the target username or chat ID.
+3. Choose archive options, including metadata, reply threads, and date filtering.
+4. Choose media types.
+5. Choose the output folder.
+6. Review the download plan.
+7. Confirm to start the download.
 
-The downloader prints a summary before it writes files, so you can cancel if
+The downloader prints a plan panel before it writes files, so you can cancel if
 the target, output folder, date range, or media types look wrong.
 
 ## Date Filtering
@@ -105,10 +104,12 @@ Dates are interpreted in your local timezone.
 
 The CLI is still fully terminal-based, but it now shows:
 
-- a startup banner;
-- a download summary before work begins;
-- one section per media type;
-- batch-level progress messages;
+- a compact startup banner;
+- a setup map for target, options, media, output, and review;
+- a plan panel before work begins;
+- one download step per media type;
+- lightweight panels for scope, active plan, resume plan, and final results;
+- concise batch-level progress messages;
 - per-file progress bars;
 - warnings when a file or reply thread cannot be downloaded;
 - a final summary with downloaded count, failed count, scanned messages, reply threads, and elapsed time.
@@ -116,7 +117,8 @@ The CLI is still fully terminal-based, but it now shows:
 ## Resuming Downloads
 
 If you interrupt a download with `Ctrl+C`, progress is saved. Choose
-`Resume active download` the next time you start the tool.
+`Resume saved download - continue after an interruption` the next time you
+start the tool.
 
 The resume menu shows the chat, date range, remaining work, and output folder
 for each active download.

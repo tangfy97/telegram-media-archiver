@@ -241,7 +241,7 @@ class TelegramBulkDownloader {
       {
         clearOnComplete: true,
         hideCursor: true,
-        format: `  {file} |{bar}| {percentage}% ETA {eta}s`,
+        format: `  {file}  |{bar}| {percentage}%  ETA {eta}s`,
       },
       {
         ...cliProgress.Presets.shades_classic,
@@ -451,6 +451,8 @@ class TelegramBulkDownloader {
   private async newDownload() {
     if (!this.client) throw new Error('TelegramClient undefined');
     cliDisplay.section('New download');
+    cliDisplay.flow(['Target', 'Options', 'Media', 'Output', 'Review'], 0);
+    cliDisplay.step(1, 5, 'Choose target');
     const query = await inquirer.prompt([
       {
         name: 'id',
@@ -460,23 +462,26 @@ class TelegramBulkDownloader {
 
     try {
       const res = await this.client.getEntity(query.id);
+      cliDisplay.success(`Selected ${extractDisplayName(res) || query.id}.`);
+      cliDisplay.flow(['Target', 'Options', 'Media', 'Output', 'Review'], 1);
+      cliDisplay.step(2, 5, 'Choose archive options');
       const { metadata, includeReplies, useStartDate, startDateInput } =
         await inquirer.prompt([
           {
             name: 'metadata',
-            message: 'Write metadata.json?',
+            message: 'Save metadata.json for message inspection?',
             type: 'confirm',
             default: false,
           },
           {
             name: 'includeReplies',
-            message: 'Include comments and reply threads?',
+            message: 'Also scan comments and reply threads?',
             type: 'confirm',
             default: false,
           },
           {
             name: 'useStartDate',
-            message: 'Start from a specific date?',
+            message: 'Limit download to messages after a date?',
             type: 'confirm',
             default: false,
           },
@@ -496,19 +501,41 @@ class TelegramBulkDownloader {
           },
         ]);
       let mediaTypes: MediaType[] = [];
+      cliDisplay.flow(['Target', 'Options', 'Media', 'Output', 'Review'], 2);
+      cliDisplay.step(3, 5, 'Choose media types');
       while (mediaTypes.length <= 0) {
         mediaTypes = await checkbox({
           message: 'Media types to download',
           choices: [
-            { name: 'Pictures', value: 'InputMessagesFilterPhotos' },
-            { name: 'Videos', value: 'InputMessagesFilterVideo' },
-            { name: 'Documents', value: 'InputMessagesFilterDocument' },
-            { name: 'Music', value: 'InputMessagesFilterMusic' },
-            { name: 'Voice messages', value: 'InputMessagesFilterVoice' },
-            { name: 'GIFs', value: 'InputMessagesFilterGif' },
+            {
+              name: 'Photos - images and Telegram albums',
+              value: 'InputMessagesFilterPhotos',
+            },
+            {
+              name: 'Videos - video files and clips',
+              value: 'InputMessagesFilterVideo',
+            },
+            {
+              name: 'Documents - PDFs, archives, and other files',
+              value: 'InputMessagesFilterDocument',
+            },
+            {
+              name: 'Music - audio tracks',
+              value: 'InputMessagesFilterMusic',
+            },
+            {
+              name: 'Voice messages - Telegram voice notes',
+              value: 'InputMessagesFilterVoice',
+            },
+            {
+              name: 'GIFs - animated media',
+              value: 'InputMessagesFilterGif',
+            },
           ],
         });
       }
+      cliDisplay.flow(['Target', 'Options', 'Media', 'Output', 'Review'], 3);
+      cliDisplay.step(4, 5, 'Choose output folder');
       const outPath = await ask('Output folder: ', {
         default: './telegram-downloads',
         validate: (input) =>
@@ -532,12 +559,13 @@ class TelegramBulkDownloader {
         originalId: query.id,
       };
 
-      cliDisplay.section('Download summary');
-      cliDisplay.summary(this.summarizeState(downloadState));
+      cliDisplay.flow(['Target', 'Options', 'Media', 'Output', 'Review'], 4);
+      cliDisplay.step(5, 5, 'Review');
+      cliDisplay.panel('Download plan', this.summarizeState(downloadState));
 
       const { confirmed } = await inquirer.prompt({
         name: 'confirmed',
-        message: 'Start this download?',
+        message: 'Start download with this plan?',
         type: 'confirm',
         default: true,
       });
@@ -561,11 +589,24 @@ class TelegramBulkDownloader {
     this.stats = this.createStats();
     this.ensureDownloadDir(this.getDownloadState(id).outPath);
 
-    cliDisplay.section('Starting');
-    cliDisplay.summary(this.summarizeState(this.getDownloadState(id)));
+    cliDisplay.section('Downloading');
+    cliDisplay.panel('Active plan', this.summarizeState(this.getDownloadState(id)));
 
-    for (const mediaType of [...this.getDownloadState(id).mediaTypes]) {
-      await this.downloadMediaType(entity, mediaType.type);
+    const queuedMediaTypes = [...this.getDownloadState(id).mediaTypes];
+    cliDisplay.flow(
+      queuedMediaTypes.map((entry) => this.mediaTypeLabel(entry.type))
+    );
+    for (const [index, mediaType] of queuedMediaTypes.entries()) {
+      cliDisplay.flow(
+        queuedMediaTypes.map((entry) => this.mediaTypeLabel(entry.type)),
+        index
+      );
+      await this.downloadMediaType(
+        entity,
+        mediaType.type,
+        index + 1,
+        queuedMediaTypes.length
+      );
     }
 
     if (this.getDownloadState(id).includeReplies) {
@@ -574,8 +615,7 @@ class TelegramBulkDownloader {
 
     this.state.remove(id);
     await this.state.commit();
-    cliDisplay.section('Finished');
-    cliDisplay.summary([
+    cliDisplay.panel('Finished', [
       ['Downloaded', this.stats.downloaded],
       ['Failed', this.stats.failed],
       ['Messages scanned', this.stats.scanned],
@@ -586,7 +626,12 @@ class TelegramBulkDownloader {
     process.exit(0);
   }
 
-  private async downloadMediaType(entity: Entity, mediaType: MediaType) {
+  private async downloadMediaType(
+    entity: Entity,
+    mediaType: MediaType,
+    index = 1,
+    total = 1
+  ) {
     if (!this.client) throw new Error('TelegramClient undefined');
     this.isDownloading = true;
     const id = entity.id.toString();
@@ -608,8 +653,8 @@ class TelegramBulkDownloader {
 
     this.ensureDownloadDir(this.getDownloadState(id).outPath);
 
-    cliDisplay.section(this.mediaTypeLabel(mediaType));
-    cliDisplay.summary([
+    cliDisplay.step(index, total, `Download ${this.mediaTypeLabel(mediaType)}`);
+    cliDisplay.panel('Scope', [
       ['Date range', this.formatStartDate(id)],
       ['Output', this.getDownloadState(id).outPath],
     ]);
@@ -623,6 +668,7 @@ class TelegramBulkDownloader {
       return;
     }
 
+    let batch = 1;
     while (true) {
       const mediaTypeState = this.getDownloadState(id).mediaTypes.find(
         (entry) => entry.type === mediaType
@@ -645,18 +691,19 @@ class TelegramBulkDownloader {
       this.stats.scanned += mediaMessages.length;
 
       if (mediaMessages.length === 0) {
-        cliDisplay.info(
+        cliDisplay.action(
           `No more ${this.mediaTypeLabel(mediaType).toLowerCase()} found.`
         );
         this.markMediaTypeDone(id, mediaType);
         break;
       }
 
-      cliDisplay.info(
-        `Found ${mediaMessages.length} ${this.mediaTypeLabel(
+      cliDisplay.action(
+        `Batch ${batch}: found ${mediaMessages.length} ${this.mediaTypeLabel(
           mediaType
-        ).toLowerCase()} in this batch.`
+        ).toLowerCase()}.`
       );
+      batch += 1;
 
       const downloadDir = this.getDownloadState(id).outPath;
       let msgId = offset;
@@ -712,10 +759,13 @@ class TelegramBulkDownloader {
     }
 
     cliDisplay.section('Resume download');
+    cliDisplay.hint(
+      'Each saved job shows: chat | date range | remaining work | output folder.'
+    );
     const res = await inquirer.prompt({
       name: 'resume',
       type: 'list',
-      message: 'Choose an active download',
+      message: 'Choose a saved download',
       choices: [
         ...activeDownloads.map((id) => ({
           name: this.formatResumeChoice(id),
@@ -729,6 +779,7 @@ class TelegramBulkDownloader {
       return this.main();
     }
 
+    cliDisplay.panel('Resume plan', this.summarizeState(this.getDownloadState(res.resume)));
     const entityRes = await this.client.getEntity(
       this.getDownloadState(res.resume).entityJson.username ||
         this.getDownloadState(res.resume).originalId
@@ -787,8 +838,14 @@ class TelegramBulkDownloader {
       type: 'list',
       message: 'What would you like to do?',
       choices: [
-        { name: 'Start new download', value: 'new_download' },
-        { name: 'Resume active download', value: 'resume' },
+        {
+          name: 'New download - choose chat, date, media, and output',
+          value: 'new_download',
+        },
+        {
+          name: 'Resume saved download - continue after an interruption',
+          value: 'resume',
+        },
         { name: 'Exit', value: 'exit' },
       ],
     });
@@ -809,7 +866,7 @@ class TelegramBulkDownloader {
     this.main();
 
     process.on('SIGINT', () => {
-      console.log('Caught interrupt signal');
+      cliDisplay.warn('Interrupt received.');
       if (!this.isDownloading) process.exit(0);
       this.SIGINT = true;
     });
